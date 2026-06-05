@@ -1,0 +1,73 @@
+name: V8 Build (Windows arm64)
+
+on: workflow_dispatch
+
+jobs:
+  build-windows-arm64:
+    name: Build V8 for windows arm64
+    runs-on: windows-11-arm
+    env:
+      DEPOT_TOOLS_WIN_TOOLCHAIN: '0'
+      DEPOT_TOOLS_UPDATE: '0'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 1
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Setup git config
+        shell: bash
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.filemode false
+          git config --global core.fscache true
+          git config --global core.preloadindex true
+
+      - name: Update depot_tools fetch config
+        shell: bash
+        run: |
+          cd deps/depot_tools
+          git config --unset-all remote.origin.fetch || true
+          git config --add remote.origin.fetch +refs/heads/*:refs/remotes/origin/*
+
+      - name: Fix x64 Debugging Tools for GN
+        shell: pwsh
+        run: |
+          $x64Dir = "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64"
+          $arm64Dir = "C:\Program Files (x86)\Windows Kits\10\Debuggers\arm64"
+          New-Item -ItemType Directory -Force -Path $x64Dir | Out-Null
+          if (Test-Path "$arm64Dir\dbghelp.dll") {
+            Copy-Item "$arm64Dir\dbghelp.dll" "$x64Dir\dbghelp.dll" -Force
+            Copy-Item "$arm64Dir\dbgcore.dll" "$x64Dir\dbgcore.dll" -Force
+            Write-Host "Copied arm64 debugger DLLs to x64 directory"
+          } else {
+            Write-Host "arm64 dbghelp.dll not found, copying from System32"
+            Copy-Item "C:\Windows\System32\dbghelp.dll" "$x64Dir\dbghelp.dll" -Force
+            Copy-Item "C:\Windows\System32\dbgcore.dll" "$x64Dir\dbgcore.dll" -Force
+          }
+          Write-Host "x64 Debuggers dir contents:"
+          Get-ChildItem $x64Dir
+
+      - name: Bootstrap depot_tools
+        shell: cmd
+        run: |
+          cd deps\depot_tools
+          call bootstrap\win_tools.bat
+
+      - name: Build V8
+        shell: cmd
+        run: |
+          cd deps
+          python build_windows.py --arch arm64
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: v8_monolith-windows-arm64
+          path: deps/windows_arm64/v8_monolith.lib

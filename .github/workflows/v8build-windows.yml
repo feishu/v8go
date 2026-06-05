@@ -1,0 +1,63 @@
+name: V8 Build (Windows x86_64)
+
+on: workflow_dispatch
+
+jobs:
+  build-windows-x86_64:
+    name: Build V8 for windows x86_64
+    runs-on: windows-2022
+    env:
+      DEPOT_TOOLS_WIN_TOOLCHAIN: '0'
+      DEPOT_TOOLS_UPDATE: '0'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 1
+
+      - name: Setup git config
+        shell: bash
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.filemode false
+          git config --global core.fscache true
+          git config --global core.preloadindex true
+
+      - name: Update depot_tools fetch config
+        shell: bash
+        run: |
+          cd deps/depot_tools
+          git config --unset-all remote.origin.fetch || true
+          git config --add remote.origin.fetch +refs/heads/*:refs/remotes/origin/*
+
+      - name: Bootstrap depot_tools
+        shell: cmd
+        run: |
+          cd deps\depot_tools
+          call bootstrap\win_tools.bat
+
+      - name: Build V8
+        shell: cmd
+        run: |
+          cd deps
+          python build_windows.py --arch x86_64
+
+      - name: Debug ICU data (on failure)
+        if: failure()
+        shell: bash
+        run: |
+          echo "=== BUILD.gn: SHARED/STATIC lines ==="
+          grep -n "ICU_UTIL_DATA_IMPL\|is_win.*icu_use_data\|stubdata\|U_HIDE_DATA" deps/v8/third_party/icu/BUILD.gn 2>/dev/null | head -20 || echo "BUILD.gn not found"
+          echo ""
+          echo "=== icudtl_dat.cc header (first 5 lines) ==="
+          head -5 deps/.build/windows_x86_64/gen/third_party/icu/icudtl_dat.cc 2>/dev/null || echo "icudtl_dat.cc not found"
+          echo ""
+          echo "=== gen-regexp-special-case.exe.rsp ==="
+          cat deps/.build/windows_x86_64/gen-regexp-special-case.exe.rsp 2>/dev/null || echo "rsp not found"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: v8_monolith-windows-x86_64
+          path: deps/windows_x86_64/v8_monolith.lib

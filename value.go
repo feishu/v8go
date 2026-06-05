@@ -391,12 +391,12 @@ func (v *Value) IsRegExp() bool {
 	return C.ValueIsRegExp(v.ptr) != 0
 }
 
-// IsAsyncFunc returns true if this value is an async function.
+// IsAsyncFunction returns true if this value is an async function.
 func (v *Value) IsAsyncFunction() bool {
 	return C.ValueIsAsyncFunction(v.ptr) != 0
 }
 
-// Is IsGeneratorFunc returns true if this value is a Generator function.
+// IsGeneratorFunction returns true if this value is a Generator function.
 func (v *Value) IsGeneratorFunction() bool {
 	return C.ValueIsGeneratorFunction(v.ptr) != 0
 }
@@ -535,11 +535,44 @@ func (v *Value) IsProxy() bool {
 // Release this value.  Using the value after calling this function will result in undefined behavior.
 func (v *Value) Release() {
 
+	// Yao: Invoke the __release() callback if present on the object.
+	// This allows JavaScript objects to perform custom cleanup (e.g., unregistering from Go maps)
+	// before the underlying V8 value is released.
+	v.ReleaseObject()
+
 	// Yao: Before releasing the value, we need to release the external object
 	// if it is an external object.
 	v.ReleaseExternal()
 
 	C.ValueRelease(v.ptr)
+}
+
+// ReleaseObject release the object if it is an object. (Yao Application Engine)
+func (v *Value) ReleaseObject() {
+	if v.IsObject() {
+		obj, err := v.AsObject()
+		if err != nil {
+			return
+		}
+
+		// Yao: Get the release function from the object
+		release, err := obj.Get("__release")
+		if err != nil {
+			return
+		}
+		defer release.Release()
+
+		if release.IsFunction() {
+			fn, err := release.AsFunction()
+			if err != nil {
+				return
+			}
+			result, _ := fn.Call(v)
+			if result != nil {
+				result.Release()
+			}
+		}
+	}
 }
 
 // IsWasmModuleObject returns true if this value is a `WasmModuleObject`.
@@ -564,6 +597,7 @@ func (v *Value) AsObject() (*Object, error) {
 	return &Object{v}, nil
 }
 
+// AsPromise will cast the value to the Promise type. If the value is not a Promise
 func (v *Value) AsPromise() (*Promise, error) {
 	if !v.IsPromise() {
 		return nil, errors.New("v8go: value is not a Promise")
@@ -571,6 +605,7 @@ func (v *Value) AsPromise() (*Promise, error) {
 	return &Promise{&Object{v}}, nil
 }
 
+// AsFunction will cast the value to the Function type. If the value is not a Function
 func (v *Value) AsFunction() (*Function, error) {
 	if !v.IsFunction() {
 		return nil, errors.New("v8go: value is not a Function")
@@ -587,6 +622,7 @@ func (v *Value) MarshalJSON() ([]byte, error) {
 	return []byte(jsonStr), nil
 }
 
+// SharedArrayBufferGetContents will get the contents of the SharedArrayBuffer.
 func (v *Value) SharedArrayBufferGetContents() ([]byte, func(), error) {
 	if !v.IsSharedArrayBuffer() {
 		return nil, nil, errors.New("v8go: value is not a SharedArrayBuffer")
