@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	v8 "rogchap.com/v8go"
 )
@@ -93,6 +94,24 @@ func TestContextRegistry(t *testing.T) {
 	c2 := v8.GetContext(ctxref)
 	if c2 != nil {
 		t.Error("expected context to be <nil> after close")
+	}
+}
+
+func TestContextCloseFromDifferentGoroutine(t *testing.T) {
+	iso := v8.NewIsolate()
+	defer iso.Dispose()
+
+	ctx := v8.NewContext(iso)
+	done := make(chan struct{})
+	go func() {
+		ctx.Close()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("context close timed out")
 	}
 }
 

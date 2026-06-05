@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math/rand"
 	"strings"
+	"sync"
 	"testing"
 
 	v8 "rogchap.com/v8go"
@@ -156,6 +157,30 @@ func TestIsolateGetHeapStatistics(t *testing.T) {
 
 	if hs.NumberOfDetachedContexts != 0 {
 		t.Error("expect NumberOfDetachedContexts return 0, got", hs.NumberOfDetachedContexts)
+	}
+}
+
+func TestIsolateGetHeapStatisticsConcurrent(t *testing.T) {
+	iso := v8.NewIsolate()
+	defer iso.Dispose()
+
+	var wg sync.WaitGroup
+	errs := make(chan string, 20)
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			stats := iso.GetHeapStatistics()
+			if stats.HeapSizeLimit == 0 {
+				errs <- "expected heap size limit"
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Error(err)
 	}
 }
 
