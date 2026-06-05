@@ -569,9 +569,9 @@ static void FunctionTemplateCallback(const FunctionCallbackInfo<Value>& info) {
                             iso, info.This()));
 
   int args_count = info.Length();
-  ValuePtr thisAndArgs[args_count + 1];
+  std::vector<ValuePtr> thisAndArgs(args_count + 1);
   thisAndArgs[0] = tracked_value(ctx, _this);
-  ValuePtr* args = thisAndArgs + 1;
+  ValuePtr* args = thisAndArgs.data() + 1;
   for (int i = 0; i < args_count; i++) {
     m_value* val = new m_value;
     val->id = 0;
@@ -583,7 +583,7 @@ static void FunctionTemplateCallback(const FunctionCallbackInfo<Value>& info) {
   }
 
   ValuePtr val =
-      goFunctionCallback(ctx_ref, callback_ref, thisAndArgs, args_count);
+      goFunctionCallback(ctx_ref, callback_ref, thisAndArgs.data(), args_count);
   if (val != nullptr) {
     info.GetReturnValue().Set(val->ptr.Get(iso));
   } else {
@@ -1688,9 +1688,10 @@ ValuePtr PromiseResult(ValuePtr ptr) {
 /********** Function **********/
 
 static void buildCallArguments(Isolate* iso,
-                               Local<Value>* argv,
+                               std::vector<Local<Value>>& argv,
                                int argc,
                                ValuePtr args[]) {
+  argv.resize(argc);
   for (int i = 0; i < argc; i++) {
     argv[i] = args[i]->ptr.Get(iso);
   }
@@ -1701,13 +1702,13 @@ RtnValue FunctionCall(ValuePtr ptr, ValuePtr recv, int argc, ValuePtr args[]) {
 
   RtnValue rtn = {};
   Local<Function> fn = Local<Function>::Cast(value);
-  Local<Value> argv[argc];
+  std::vector<Local<Value>> argv;
   buildCallArguments(iso, argv, argc, args);
 
   Local<Value> local_recv = recv->ptr.Get(iso);
 
   Local<Value> result;
-  if (!fn->Call(local_ctx, local_recv, argc, argv).ToLocal(&result)) {
+  if (!fn->Call(local_ctx, local_recv, argc, argv.data()).ToLocal(&result)) {
     rtn.error = ExceptionError(try_catch, iso, local_ctx);
     return rtn;
   }
@@ -1724,10 +1725,10 @@ RtnValue FunctionNewInstance(ValuePtr ptr, int argc, ValuePtr args[]) {
   LOCAL_VALUE(ptr)
   RtnValue rtn = {};
   Local<Function> fn = Local<Function>::Cast(value);
-  Local<Value> argv[argc];
+  std::vector<Local<Value>> argv;
   buildCallArguments(iso, argv, argc, args);
   Local<Object> result;
-  if (!fn->NewInstance(local_ctx, argc, argv).ToLocal(&result)) {
+  if (!fn->NewInstance(local_ctx, argc, argv.data()).ToLocal(&result)) {
     rtn.error = ExceptionError(try_catch, iso, local_ctx);
     return rtn;
   }

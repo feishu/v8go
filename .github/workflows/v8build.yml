@@ -21,9 +21,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          lfs: true
           submodules: true
           fetch-depth: 1
+
+      - name: Unzip libv8
+        run: |
+          files=$(find . -name "libv8*.zip")
+          for file in $files; do
+            dir=$(dirname "$file")  # Get the directory where the ZIP file is located
+            echo "Extracting $file to directory $dir"
+            unzip -o -d $dir $file
+          done
 
       - name: Update depot_tools fetch config
         run: cd deps/depot_tools && git config --unset-all remote.origin.fetch; git config --add remote.origin.fetch +refs/heads/*:refs/remotes/origin/*
