@@ -7,6 +7,7 @@
 #ifdef __cplusplus
 
 #include "libplatform/libplatform.h"
+#include "v8-inspector.h"
 #include "v8-profiler.h"
 #include "v8.h"
 
@@ -48,11 +49,15 @@ extern const int ScriptCompilerConsumeCodeCache;
 extern const int ScriptCompilerEagerCompile;
 
 typedef struct m_ctx m_ctx;
+typedef struct m_inspector m_inspector;
+typedef struct m_inspector_session m_inspector_session;
 typedef struct m_value m_value;
 typedef struct m_template m_template;
 typedef struct m_unboundScript m_unboundScript;
 
 typedef m_ctx* ContextPtr;
+typedef m_inspector* InspectorPtr;
+typedef m_inspector_session* SessionPtr;
 typedef m_value* ValuePtr;
 typedef m_template* TemplatePtr;
 typedef m_unboundScript* UnboundScriptPtr;
@@ -190,6 +195,36 @@ extern RtnValue RunScript(ContextPtr ctx_ptr,
 extern RtnValue JSONParse(ContextPtr ctx_ptr, const char* str);
 const char* JSONStringify(ContextPtr ctx_ptr, ValuePtr val_ptr);
 extern ValuePtr ContextGlobal(ContextPtr ctx_ptr);
+
+typedef struct {
+  int contextGroupID;
+  const char* name;
+  const char* origin;
+  int waitForDebugger;
+} InspectorOptions;
+
+extern InspectorPtr InspectorNew(IsolatePtr iso_ptr);
+extern RtnError InspectorContextCreated(InspectorPtr ins_ptr,
+                                        ContextPtr ctx_ptr,
+                                        int context_group_id,
+                                        const char* name,
+                                        const char* origin);
+extern RtnError InspectorContextDestroyed(InspectorPtr ins_ptr,
+                                          ContextPtr ctx_ptr);
+extern SessionPtr InspectorConnect(InspectorPtr ins_ptr,
+                                   ContextPtr ctx_ptr,
+                                   int context_group_id,
+                                   int channel_ref,
+                                   int wait_for_debugger);
+extern RtnError InspectorDispatch(SessionPtr session_ptr,
+                                  const char* message,
+                                  int length);
+extern RtnError InspectorPause(SessionPtr session_ptr, const char* reason);
+extern RtnError InspectorResume(SessionPtr session_ptr);
+extern RtnError InspectorStop(SessionPtr session_ptr);
+extern RtnString InspectorState(SessionPtr session_ptr);
+extern void InspectorSessionClose(SessionPtr session_ptr);
+extern void InspectorFree(InspectorPtr ins_ptr);
 
 extern void TemplateFreeWrapper(TemplatePtr ptr);
 extern void TemplateSetValue(TemplatePtr ptr,

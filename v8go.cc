@@ -6,9 +6,14 @@
 
 #include <stdio.h>
 
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <iostream>
+#include <memory>
+#include <mutex>
+#include <queue>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -25,8 +30,12 @@ const int ScriptCompilerNoCompileOptions = ScriptCompiler::kNoCompileOptions;
 const int ScriptCompilerConsumeCodeCache = ScriptCompiler::kConsumeCodeCache;
 const int ScriptCompilerEagerCompile = ScriptCompiler::kEagerCompile;
 
+struct m_inspector;
+struct m_inspector_session;
+
 struct m_ctx {
   Isolate* iso;
+  m_inspector* inspector;
   std::unordered_map<long, m_value*> vals;
   std::vector<m_unboundScript*> unboundScripts;
   Persistent<Context> ptr;
@@ -48,6 +57,153 @@ struct m_template {
 struct m_unboundScript {
   Persistent<UnboundScript> ptr;
 };
+
+static std::string InspectorMessageToString(
+    std::unique_ptr<v8_inspector::StringBuffer> message);
+const char* CopyString(std::string str);
+const char* CopyString(String::Utf8Value& value);
+
+class YaoInspectorClient : public v8_inspector::V8InspectorClient {
+ public:
+  void runMessageLoopOnPause(int contextGroupId) override {
+    std::unique_lock<std::mutex> lock(mu_);
+    paused_ = true;
+    while (!shutdown_ && paused_) {
+      if (tasks_.empty()) {
+        cv_.wait(lock, [&] { return shutdown_ || !paused_ || !tasks_.empty(); });
+        continue;
+      }
+
+      auto task = std::move(tasks_.front());
+      tasks_.pop();
+      lock.unlock();
+      task();
+      lock.lock();
+    }
+  }
+
+  void quitMessageLoopOnPause() override {
+    std::lock_guard<std::mutex> lock(mu_);
+    paused_ = false;
+    cv_.notify_all();
+  }
+
+  void runIfWaitingForDebugger(int contextGroupId) override {
+    std::lock_guard<std::mutex> lock(mu_);
+    cv_.notify_all();
+  }
+
+  void stop() {
+    std::lock_guard<std::mutex> lock(mu_);
+    shutdown_ = true;
+    paused_ = false;
+    cv_.notify_all();
+  }
+
+  bool dispatchOnPause(std::function<void()> task) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (shutdown_ || !paused_) {
+      return false;
+    }
+    tasks_.push(std::move(task));
+    cv_.notify_all();
+    return true;
+  }
+
+ private:
+  std::mutex mu_;
+  std::condition_variable cv_;
+  std::queue<std::function<void()>> tasks_;
+  bool paused_ = false;
+  bool shutdown_ = false;
+};
+
+class YaoInspectorChannel : public v8_inspector::V8Inspector::Channel {
+ public:
+  explicit YaoInspectorChannel(int channel_ref) : channel_ref_(channel_ref) {}
+
+  void sendResponse(int callId,
+                    std::unique_ptr<v8_inspector::StringBuffer> message) override {
+    auto bytes = InspectorMessageToString(std::move(message));
+    if (!bytes.empty()) {
+      goInspectorSendResponse(channel_ref_, callId,
+                              const_cast<char*>(bytes.c_str()),
+                              static_cast<int>(bytes.size()));
+    }
+  }
+
+  void sendNotification(
+      std::unique_ptr<v8_inspector::StringBuffer> message) override {
+    auto bytes = InspectorMessageToString(std::move(message));
+    if (!bytes.empty()) {
+      goInspectorSendNotification(channel_ref_, const_cast<char*>(bytes.c_str()),
+                                  static_cast<int>(bytes.size()));
+    }
+  }
+
+  void flushProtocolNotifications() override { goInspectorFlush(channel_ref_); }
+
+ private:
+  int channel_ref_;
+};
+
+struct m_inspector {
+  Isolate* iso;
+  std::unique_ptr<YaoInspectorClient> client;
+  std::unique_ptr<v8_inspector::V8Inspector> inspector;
+  std::unordered_map<m_ctx*, int> contexts;
+  std::unordered_map<int, m_inspector_session*> sessions;
+  std::mutex mu;
+};
+
+struct m_inspector_session {
+  m_inspector* owner;
+  m_ctx* ctx;
+  int channel_ref;
+  int context_group_id;
+  std::unique_ptr<YaoInspectorChannel> channel;
+  std::unique_ptr<v8_inspector::V8InspectorSession> session;
+};
+
+static void InspectorDetachContext(m_ctx* ctx);
+static void InspectorSessionCloseNative(m_inspector_session* session);
+static Isolate* InspectorSessionIsolate(m_inspector_session* session);
+static void InspectorSessionSoftClose(m_inspector_session* session);
+static void InspectorSessionRemoveFromOwner(m_inspector_session* session);
+static RtnError InspectorMakeError(const std::string& message);
+
+static inline v8_inspector::StringView InspectorStringView(const char* s) {
+  if (s == nullptr) {
+    return v8_inspector::StringView();
+  }
+  return v8_inspector::StringView(
+      reinterpret_cast<const uint8_t*>(s), strlen(s));
+}
+
+static std::string InspectorMessageToString(
+    std::unique_ptr<v8_inspector::StringBuffer> message) {
+  if (!message) {
+    return "";
+  }
+  auto view = message->string();
+  if (view.is8Bit()) {
+    return std::string(reinterpret_cast<const char*>(view.characters8()),
+                       view.length());
+  }
+  std::string out;
+  out.reserve(view.length());
+  const uint16_t* chars = view.characters16();
+  for (size_t i = 0; i < view.length(); ++i) {
+    out.push_back(static_cast<char>(chars[i] & 0xFF));
+  }
+  return out;
+}
+
+static RtnError InspectorMakeError(const std::string& message) {
+  RtnError rtn = {nullptr, nullptr, nullptr};
+  rtn.msg = CopyString(message);
+  return rtn;
+}
 
 const char* CopyString(std::string str) {
   int len = str.length();
@@ -124,6 +280,99 @@ m_unboundScript* tracked_unbound_script(m_ctx* ctx, m_unboundScript* us) {
   return us;
 }
 
+static void InspectorSessionRemoveFromOwner(m_inspector_session* session) {
+  if (session == nullptr || session->owner == nullptr) {
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(session->owner->mu);
+  auto it = session->owner->sessions.find(session->channel_ref);
+  if (it != session->owner->sessions.end() && it->second == session) {
+    session->owner->sessions.erase(it);
+  }
+}
+
+static Isolate* InspectorSessionIsolate(m_inspector_session* session) {
+  if (session == nullptr) {
+    return nullptr;
+  }
+  if (session->owner != nullptr && session->owner->iso != nullptr) {
+    return session->owner->iso;
+  }
+  if (session->ctx != nullptr) {
+    return session->ctx->iso;
+  }
+  return nullptr;
+}
+
+static void InspectorSessionSoftClose(m_inspector_session* session) {
+  if (session == nullptr) {
+    return;
+  }
+
+  if (session->session != nullptr) {
+    session->session->stop();
+    session->session.reset();
+  }
+}
+
+static void InspectorSessionCloseNative(m_inspector_session* session) {
+  if (session == nullptr) {
+    return;
+  }
+
+  Isolate* iso = InspectorSessionIsolate(session);
+  if (iso != nullptr) {
+    Locker locker(iso);
+    Isolate::Scope isolate_scope(iso);
+    HandleScope handle_scope(iso);
+    InspectorSessionSoftClose(session);
+  } else {
+    InspectorSessionSoftClose(session);
+  }
+  InspectorSessionRemoveFromOwner(session);
+  delete session;
+}
+
+static void InspectorDetachContext(m_ctx* ctx) {
+  if (ctx == nullptr || ctx->inspector == nullptr || ctx->ptr.IsEmpty()) {
+    return;
+  }
+
+  m_inspector* ins = ctx->inspector;
+  Isolate* iso = ctx->iso;
+
+  Locker locker(iso);
+  Isolate::Scope isolate_scope(iso);
+  HandleScope handle_scope(iso);
+  Local<Context> local_ctx = ctx->ptr.Get(iso);
+
+  std::vector<m_inspector_session*> sessions;
+  {
+    std::lock_guard<std::mutex> lock(ins->mu);
+    auto it = ins->contexts.find(ctx);
+    if (it != ins->contexts.end()) {
+      ins->contexts.erase(it);
+    }
+    for (auto& entry : ins->sessions) {
+      if (entry.second != nullptr && entry.second->ctx == ctx) {
+        sessions.push_back(entry.second);
+      }
+    }
+  }
+
+  ins->inspector->contextDestroyed(local_ctx);
+
+  for (m_inspector_session* session : sessions) {
+    InspectorSessionSoftClose(session);
+    InspectorSessionRemoveFromOwner(session);
+    session->ctx = nullptr;
+    session->owner = nullptr;
+  }
+
+  ctx->inspector = nullptr;
+}
+
 extern "C" {
 
 /********** Yao App Enine **********/
@@ -151,7 +400,7 @@ IsolatePtr YaoNewIsolate() {
   iso->SetCaptureStackTraceForUncaughtExceptions(true);
 
   // Create a Context for internal use
-  m_ctx* ctx = new m_ctx;
+  m_ctx* ctx = new m_ctx{};
   ctx->ptr.Reset(iso, Context::New(iso));
   ctx->iso = iso;
   iso->SetData(0, ctx);
@@ -230,7 +479,7 @@ IsolatePtr NewIsolate() {
   iso->SetCaptureStackTraceForUncaughtExceptions(true);
 
   // Create a Context for internal use
-  m_ctx* ctx = new m_ctx;
+  m_ctx* ctx = new m_ctx{};
   ctx->ptr.Reset(iso, Context::New(iso));
   ctx->iso = iso;
   iso->SetData(0, ctx);
@@ -665,7 +914,7 @@ ContextPtr NewContext(IsolatePtr iso,
   Local<Context> local_ctx = Context::New(iso, nullptr, global_template);
   local_ctx->SetEmbedderData(1, Integer::New(iso, ref));
 
-  m_ctx* ctx = new m_ctx;
+  m_ctx* ctx = new m_ctx{};
   ctx->ptr.Reset(iso, local_ctx);
   ctx->iso = iso;
   return ctx;
@@ -679,6 +928,8 @@ void ContextFree(ContextPtr ctx) {
   if (ctx == nullptr) {
     return;
   }
+
+  InspectorDetachContext(ctx);
   ctx->ptr.Reset();
 
   for (auto it = ctx->vals.begin(); it != ctx->vals.end(); ++it) {
@@ -862,6 +1113,328 @@ ValuePtr ContextGlobal(ContextPtr ctx) {
       iso, local_ctx->Global());
 
   return tracked_value(ctx, val);
+}
+
+/********** Inspector **********/
+
+InspectorPtr InspectorNew(IsolatePtr iso_ptr) {
+  Isolate* iso = static_cast<Isolate*>(iso_ptr);
+  if (iso == nullptr) {
+    return nullptr;
+  }
+
+  Locker locker(iso);
+  Isolate::Scope isolate_scope(iso);
+  HandleScope handle_scope(iso);
+
+  m_inspector* ins = new m_inspector{};
+  ins->iso = iso;
+  ins->client = std::make_unique<YaoInspectorClient>();
+  ins->inspector = v8_inspector::V8Inspector::create(iso, ins->client.get());
+  if (!ins->inspector) {
+    delete ins;
+    return nullptr;
+  }
+
+  return ins;
+}
+
+RtnError InspectorContextCreated(InspectorPtr ins_ptr,
+                                 ContextPtr ctx_ptr,
+                                 int context_group_id,
+                                 const char* name,
+                                 const char* origin) {
+  RtnError rtn = {nullptr, nullptr, nullptr};
+  if (ins_ptr == nullptr || ctx_ptr == nullptr) {
+    return InspectorMakeError("inspector contextCreated requires live handles");
+  }
+  if (context_group_id == 0) {
+    return InspectorMakeError("inspector context group id must be non-zero");
+  }
+
+  m_inspector* ins = ins_ptr;
+  m_ctx* ctx = ctx_ptr;
+  Isolate* iso = ins->iso;
+
+  Locker locker(iso);
+  Isolate::Scope isolate_scope(iso);
+  HandleScope handle_scope(iso);
+  Local<Context> local_ctx = ctx->ptr.Get(iso);
+
+  {
+    std::lock_guard<std::mutex> lock(ins->mu);
+    if (ctx->inspector != nullptr && ctx->inspector != ins) {
+      return InspectorMakeError("context already belongs to another inspector");
+    }
+    ctx->inspector = ins;
+    ins->contexts[ctx] = context_group_id;
+  }
+
+  v8_inspector::V8ContextInfo info(
+      local_ctx, context_group_id, InspectorStringView(name));
+  info.origin = InspectorStringView(origin);
+  ins->inspector->contextCreated(info);
+  return rtn;
+}
+
+RtnError InspectorContextDestroyed(InspectorPtr ins_ptr, ContextPtr ctx_ptr) {
+  RtnError rtn = {nullptr, nullptr, nullptr};
+  if (ins_ptr == nullptr || ctx_ptr == nullptr) {
+    return rtn;
+  }
+
+  m_inspector* ins = ins_ptr;
+  m_ctx* ctx = ctx_ptr;
+  if (ctx->inspector != ins) {
+    return rtn;
+  }
+
+  InspectorDetachContext(ctx);
+  return rtn;
+}
+
+SessionPtr InspectorConnect(InspectorPtr ins_ptr,
+                            ContextPtr ctx_ptr,
+                            int context_group_id,
+                            int channel_ref,
+                            int wait_for_debugger) {
+  if (ins_ptr == nullptr || ctx_ptr == nullptr || channel_ref == 0) {
+    return nullptr;
+  }
+
+  m_inspector* ins = ins_ptr;
+  m_ctx* ctx = ctx_ptr;
+  if (ctx->inspector != ins) {
+    return nullptr;
+  }
+
+  Isolate* iso = ins->iso;
+  Locker locker(iso);
+  Isolate::Scope isolate_scope(iso);
+  HandleScope handle_scope(iso);
+  Local<Context> local_ctx = ctx->ptr.Get(iso);
+  Context::Scope context_scope(local_ctx);
+
+  std::unique_ptr<YaoInspectorChannel> channel =
+      std::make_unique<YaoInspectorChannel>(channel_ref);
+  auto state = InspectorStringView(nullptr);
+  auto pause_state = wait_for_debugger
+                         ? v8_inspector::V8Inspector::kWaitingForDebugger
+                         : v8_inspector::V8Inspector::kNotWaitingForDebugger;
+  std::unique_ptr<v8_inspector::V8InspectorSession> session = ins->inspector->connect(
+      context_group_id, channel.get(), state,
+      v8_inspector::V8Inspector::kFullyTrusted, pause_state);
+  if (!session) {
+    return nullptr;
+  }
+
+  m_inspector_session* owner = new m_inspector_session{};
+  owner->owner = ins;
+  owner->ctx = ctx;
+  owner->channel_ref = channel_ref;
+  owner->context_group_id = context_group_id;
+  owner->channel = std::move(channel);
+  owner->session = std::move(session);
+
+  {
+    std::lock_guard<std::mutex> lock(ins->mu);
+    ins->sessions[channel_ref] = owner;
+  }
+
+  return owner;
+}
+
+static RtnError InspectorSessionClosedError() {
+  return InspectorMakeError("inspector session is closed");
+}
+
+RtnError InspectorDispatch(SessionPtr session_ptr,
+                           const char* message,
+                           int length) {
+  if (session_ptr == nullptr || message == nullptr || length <= 0) {
+    return InspectorSessionClosedError();
+  }
+
+  m_inspector_session* session = session_ptr;
+  if (session->session == nullptr) {
+    return InspectorSessionClosedError();
+  }
+
+  Isolate* iso = session->owner != nullptr ? session->owner->iso : nullptr;
+  if (iso == nullptr) {
+    return InspectorSessionClosedError();
+  }
+
+  std::string payload(message, static_cast<size_t>(length));
+  YaoInspectorClient* client =
+      session->owner != nullptr && session->owner->client
+          ? session->owner->client.get()
+          : nullptr;
+  if (client != nullptr && client->dispatchOnPause([session, payload]() {
+        if (session == nullptr || session->session == nullptr) {
+          return;
+        }
+        session->session->dispatchProtocolMessage(
+            v8_inspector::StringView(
+                reinterpret_cast<const uint8_t*>(payload.data()),
+                payload.size()));
+      })) {
+    return {nullptr, nullptr, nullptr};
+  }
+
+  Locker locker(iso);
+  Isolate::Scope isolate_scope(iso);
+  HandleScope handle_scope(iso);
+  session->session->dispatchProtocolMessage(
+      v8_inspector::StringView(reinterpret_cast<const uint8_t*>(message),
+                               static_cast<size_t>(length)));
+  return {nullptr, nullptr, nullptr};
+}
+
+RtnError InspectorPause(SessionPtr session_ptr, const char* reason) {
+  if (session_ptr == nullptr) {
+    return InspectorSessionClosedError();
+  }
+
+  m_inspector_session* session = session_ptr;
+  if (session->session == nullptr) {
+    return InspectorSessionClosedError();
+  }
+
+  Isolate* iso = session->owner != nullptr ? session->owner->iso : nullptr;
+  if (iso == nullptr) {
+    return InspectorSessionClosedError();
+  }
+
+  Locker locker(iso);
+  Isolate::Scope isolate_scope(iso);
+  HandleScope handle_scope(iso);
+  session->session->schedulePauseOnNextStatement(
+      InspectorStringView(reason), v8_inspector::StringView());
+  return {nullptr, nullptr, nullptr};
+}
+
+RtnError InspectorResume(SessionPtr session_ptr) {
+  if (session_ptr == nullptr) {
+    return InspectorSessionClosedError();
+  }
+
+  m_inspector_session* session = session_ptr;
+  if (session->session == nullptr) {
+    return InspectorSessionClosedError();
+  }
+
+  Isolate* iso = session->owner != nullptr ? session->owner->iso : nullptr;
+  if (iso == nullptr) {
+    return InspectorSessionClosedError();
+  }
+
+  Locker locker(iso);
+  Isolate::Scope isolate_scope(iso);
+  HandleScope handle_scope(iso);
+  session->session->resume(false);
+  return {nullptr, nullptr, nullptr};
+}
+
+RtnError InspectorStop(SessionPtr session_ptr) {
+  if (session_ptr == nullptr) {
+    return InspectorSessionClosedError();
+  }
+
+  m_inspector_session* session = session_ptr;
+  if (session->session == nullptr) {
+    return InspectorSessionClosedError();
+  }
+
+  session->session->stop();
+  return {nullptr, nullptr, nullptr};
+}
+
+RtnString InspectorState(SessionPtr session_ptr) {
+  RtnString rtn = {};
+  if (session_ptr == nullptr) {
+    rtn.error = InspectorSessionClosedError();
+    return rtn;
+  }
+
+  m_inspector_session* session = session_ptr;
+  if (session->session == nullptr) {
+    rtn.error = InspectorSessionClosedError();
+    return rtn;
+  }
+
+  Isolate* iso = session->owner != nullptr ? session->owner->iso : nullptr;
+  if (iso == nullptr) {
+    rtn.error = InspectorSessionClosedError();
+    return rtn;
+  }
+
+  Locker locker(iso);
+  Isolate::Scope isolate_scope(iso);
+  HandleScope handle_scope(iso);
+
+  std::vector<uint8_t> state = session->session->state();
+  if (state.empty()) {
+    return rtn;
+  }
+
+  std::string state_str(state.begin(), state.end());
+  rtn.data = CopyString(state_str);
+  rtn.length = static_cast<int>(state.size());
+  return rtn;
+}
+
+void InspectorSessionClose(SessionPtr session_ptr) {
+  if (session_ptr == nullptr) {
+    return;
+  }
+
+  m_inspector_session* session = session_ptr;
+  InspectorSessionCloseNative(session);
+}
+
+void InspectorFree(InspectorPtr ins_ptr) {
+  if (ins_ptr == nullptr) {
+    return;
+  }
+
+  m_inspector* ins = ins_ptr;
+  std::vector<m_ctx*> contexts;
+  {
+    std::lock_guard<std::mutex> lock(ins->mu);
+    contexts.reserve(ins->contexts.size());
+    for (auto& entry : ins->contexts) {
+      contexts.push_back(entry.first);
+    }
+  }
+
+  for (m_ctx* ctx : contexts) {
+    InspectorDetachContext(ctx);
+  }
+
+  std::vector<m_inspector_session*> sessions;
+  {
+    std::lock_guard<std::mutex> lock(ins->mu);
+    sessions.reserve(ins->sessions.size());
+    for (auto& entry : ins->sessions) {
+      sessions.push_back(entry.second);
+    }
+    ins->sessions.clear();
+  }
+
+  for (m_inspector_session* session : sessions) {
+    if (session == nullptr) {
+      continue;
+    }
+    InspectorSessionCloseNative(session);
+  }
+
+  if (ins->client) {
+    ins->client->stop();
+  }
+  ins->inspector.reset();
+  ins->client.reset();
+  delete ins;
 }
 
 /********** Value **********/
