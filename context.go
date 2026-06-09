@@ -17,8 +17,12 @@ import (
 // a registry so that we can lookup the Context from any given callback from V8.
 // This is similar to what is described here: https://github.com/golang/go/wiki/cgo#function-variables
 type ctxRef struct {
-	ctx      *Context
-	refCount int
+	ctx             *Context
+	refCount        int
+	closing         bool
+	activeCallbacks int
+	callbacksDone   chan struct{}
+	closeDone       chan struct{}
 }
 
 var ctxMutex sync.RWMutex
@@ -122,25 +126,77 @@ func (c *Context) PerformMicrotaskCheckpoint() {
 // Close will dispose the context and free the memory.
 // Access to any values associated with the context after calling Close may panic.
 func (c *Context) Close() {
-	c.deregister()
-	C.ContextFree(c.ptr)
-	c.ptr = nil
+	ptr, ok := c.beginClose()
+	if !ok {
+		return
+	}
+	C.ContextFree(ptr)
+	c.finishClose(ptr)
 }
 
 func (c *Context) register() {
 	ctxMutex.Lock()
 	r := ctxRegistry[c.ref]
 	if r == nil {
-		r = &ctxRef{ctx: c}
+		r = newContextRef(c)
 		ctxRegistry[c.ref] = r
 	}
 	r.refCount++
 	ctxMutex.Unlock()
 }
 
-func (c *Context) deregister() {
+func newContextRef(ctx *Context) *ctxRef {
+	callbacksDone := make(chan struct{})
+	close(callbacksDone)
+	return &ctxRef{ctx: ctx, callbacksDone: callbacksDone, closeDone: make(chan struct{})}
+}
+
+func (c *Context) beginClose() (C.ContextPtr, bool) {
+	if c == nil {
+		return nil, false
+	}
+
+	ctxMutex.Lock()
+	r := ctxRegistry[c.ref]
+	if c.ptr == nil {
+		var closeDone chan struct{}
+		if r != nil && r.closing {
+			closeDone = r.closeDone
+		}
+		ctxMutex.Unlock()
+		if closeDone != nil {
+			<-closeDone
+		}
+		return nil, false
+	}
+	if r == nil {
+		ptr := c.ptr
+		c.ptr = nil
+		ctxMutex.Unlock()
+		return ptr, true
+	}
+	if r.closing {
+		closeDone := r.closeDone
+		ctxMutex.Unlock()
+		<-closeDone
+		return nil, false
+	}
+
+	r.closing = true
+	callbacksDone := r.callbacksDone
+	ptr := c.ptr
+	ctxMutex.Unlock()
+
+	<-callbacksDone
+	return ptr, true
+}
+
+func (c *Context) finishClose(ptr C.ContextPtr) {
 	ctxMutex.Lock()
 	defer ctxMutex.Unlock()
+	if c.ptr == ptr {
+		c.ptr = nil
+	}
 	r := ctxRegistry[c.ref]
 	if r == nil {
 		return
@@ -149,6 +205,7 @@ func (c *Context) deregister() {
 	if r.refCount <= 0 {
 		delete(ctxRegistry, c.ref)
 	}
+	close(r.closeDone)
 }
 
 func getContext(ref int) *Context {
@@ -161,10 +218,54 @@ func getContext(ref int) *Context {
 	return r.ctx
 }
 
+func acquireContextCallback(ref int) (*Context, C.ContextPtr, bool) {
+	ctxMutex.Lock()
+	defer ctxMutex.Unlock()
+	r := ctxRegistry[ref]
+	if r == nil || r.ctx == nil || r.ctx.ptr == nil || r.closing {
+		return nil, nil, false
+	}
+	if r.activeCallbacks == 0 {
+		r.callbacksDone = make(chan struct{})
+	}
+	r.activeCallbacks++
+	return r.ctx, r.ctx.ptr, true
+}
+
+func releaseContextCallback(ref int) {
+	ctxMutex.Lock()
+	defer ctxMutex.Unlock()
+	r := ctxRegistry[ref]
+	if r == nil || r.activeCallbacks == 0 {
+		return
+	}
+	r.activeCallbacks--
+	if r.activeCallbacks == 0 {
+		close(r.callbacksDone)
+	}
+}
+
 //export goContext
 func goContext(ref int) C.ContextPtr {
 	ctx := getContext(ref)
+	if ctx == nil {
+		return nil
+	}
 	return ctx.ptr
+}
+
+//export goContextAcquire
+func goContextAcquire(ref int) C.ContextPtr {
+	_, ptr, ok := acquireContextCallback(ref)
+	if !ok {
+		return nil
+	}
+	return ptr
+}
+
+//export goContextRelease
+func goContextRelease(ref int) {
+	releaseContextCallback(ref)
 }
 
 func valueResult(ctx *Context, rtn C.RtnValue) (*Value, error) {

@@ -7,6 +7,7 @@ package v8go_test
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -112,6 +113,120 @@ func TestContextCloseFromDifferentGoroutine(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("context close timed out")
+	}
+}
+
+func TestContextCloseWaitsForActiveFunctionCallback(t *testing.T) {
+	iso := v8.NewIsolate()
+	defer iso.Dispose()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	global := v8.NewObjectTemplate(iso)
+	err := global.Set("block", v8.NewFunctionTemplate(iso, func(info *v8.FunctionCallbackInfo) *v8.Value {
+		close(entered)
+		<-release
+		return nil
+	}))
+	fatalIf(t, err)
+
+	ctx := v8.NewContext(iso, global)
+	runDone := make(chan error, 1)
+	go func() {
+		_, err := ctx.RunScript(`block()`, "block.js")
+		runDone <- err
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("function callback was not entered")
+	}
+
+	closeDone := make(chan struct{})
+	go func() {
+		ctx.Close()
+		close(closeDone)
+	}()
+
+	select {
+	case <-closeDone:
+		close(release)
+		<-runDone
+		t.Fatal("Context.Close returned before active function callback completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	if err := <-runDone; err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("Context.Close did not return after function callback completed")
+	}
+}
+
+func TestFunctionCallbackCanThrowAfterConcurrentCloseRequested(t *testing.T) {
+	iso := v8.NewIsolate()
+	defer iso.Dispose()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	global := v8.NewObjectTemplate(iso)
+	err := global.Set("fail", v8.NewFunctionTemplate(iso, func(info *v8.FunctionCallbackInfo) *v8.Value {
+		close(entered)
+		<-release
+		msg, err := v8.NewValue(info.Context().Isolate(), "callback failed after close request")
+		if err != nil {
+			panic(err)
+		}
+		info.Context().Isolate().ThrowException(msg)
+		return nil
+	}))
+	fatalIf(t, err)
+
+	ctx := v8.NewContext(iso, global)
+	runDone := make(chan error, 1)
+	go func() {
+		_, err := ctx.RunScript(`fail()`, "fail.js")
+		runDone <- err
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("function callback was not entered")
+	}
+
+	closeDone := make(chan struct{})
+	go func() {
+		ctx.Close()
+		close(closeDone)
+	}()
+
+	select {
+	case <-closeDone:
+		close(release)
+		<-runDone
+		t.Fatal("Context.Close returned before callback threw its exception")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	err = <-runDone
+	if err == nil || !strings.Contains(err.Error(), "callback failed after close request") {
+		t.Fatalf("expected callback exception, got %v", err)
+	}
+
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("Context.Close did not return after callback exception")
 	}
 }
 

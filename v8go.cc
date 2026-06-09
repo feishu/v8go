@@ -806,7 +806,11 @@ static void FunctionTemplateCallback(const FunctionCallbackInfo<Value>& info) {
   // we can use the context registry to match the Context on the Go side
   Local<Context> local_ctx = iso->GetCurrentContext();
   int ctx_ref = local_ctx->GetEmbedderData(1).As<Integer>()->Value();
-  m_ctx* ctx = goContext(ctx_ref);
+  m_ctx* ctx = goContextAcquire(ctx_ref);
+  if (ctx == nullptr) {
+    info.GetReturnValue().SetUndefined();
+    return;
+  }
 
   int callback_ref = info.Data().As<Integer>()->Value();
 
@@ -838,6 +842,7 @@ static void FunctionTemplateCallback(const FunctionCallbackInfo<Value>& info) {
   } else {
     info.GetReturnValue().SetUndefined();
   }
+  goContextRelease(ctx_ref);
 }
 
 TemplatePtr NewFunctionTemplate(IsolatePtr iso, int callback_ref) {
@@ -928,6 +933,11 @@ void ContextFree(ContextPtr ctx) {
   if (ctx == nullptr) {
     return;
   }
+
+  Isolate* iso = ctx->iso;
+  Locker locker(iso);
+  Isolate::Scope isolate_scope(iso);
+  HandleScope handle_scope(iso);
 
   InspectorDetachContext(ctx);
   ctx->ptr.Reset();

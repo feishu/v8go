@@ -168,9 +168,6 @@ func (v *Value) ArrayIndex() (idx uint32, ok bool) {
 
 // BigInt perform the equivalent of `BigInt(value)` in JS.
 func (v *Value) BigInt() *big.Int {
-	if v == nil {
-		return nil
-	}
 	bint := C.ValueToBigInt(v.ptr)
 	defer C.free(unsafe.Pointer(bint.word_array))
 	if bint.word_array == nil {

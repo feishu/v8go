@@ -430,16 +430,17 @@ func TestValueBigInt(t *testing.T) {
 	x, _ := new(big.Int).SetString("36893488147419099136", 10) // larger than a single word size (64bit)
 
 	tests := [...]struct {
-		source   string
-		expected *big.Int
+		source    string
+		expected  *big.Int
+		expectErr bool
 	}{
-		{"BigInt(0)", &big.Int{}},
-		{"-1n", big.NewInt(-1)},
-		{"new BigInt(1)", nil}, // bad syntax
-		{"BigInt(Number.MAX_SAFE_INTEGER)", big.NewInt(1<<53 - 1)},
-		{"BigInt(Number.MIN_SAFE_INTEGER)", new(big.Int).Neg(big.NewInt(1<<53 - 1))},
-		{"BigInt(Number.MAX_SAFE_INTEGER) * 2n", big.NewInt(1<<54 - 2)},
-		{"BigInt(Number.MAX_SAFE_INTEGER) * 4096n", x},
+		{"BigInt(0)", &big.Int{}, false},
+		{"-1n", big.NewInt(-1), false},
+		{"new BigInt(1)", nil, true}, // bad syntax
+		{"BigInt(Number.MAX_SAFE_INTEGER)", big.NewInt(1<<53 - 1), false},
+		{"BigInt(Number.MIN_SAFE_INTEGER)", new(big.Int).Neg(big.NewInt(1<<53 - 1)), false},
+		{"BigInt(Number.MAX_SAFE_INTEGER) * 2n", big.NewInt(1<<54 - 2), false},
+		{"BigInt(Number.MAX_SAFE_INTEGER) * 4096n", x, false},
 	}
 
 	for _, tt := range tests {
@@ -448,7 +449,16 @@ func TestValueBigInt(t *testing.T) {
 			ctx := v8.NewContext(iso)
 			defer ctx.Close()
 
-			val, _ := ctx.RunScript(tt.source, "test.js")
+			val, err := ctx.RunScript(tt.source, "test.js")
+			if tt.expectErr {
+				if err == nil {
+					t.Fatal("expected script error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
 			b := val.BigInt()
 			if b == nil && tt.expected != nil {
 				t.Errorf("uexpected <nil> value")
