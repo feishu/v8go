@@ -532,6 +532,19 @@ IsolateHStatistics IsolationGetHeapStatistics(IsolatePtr iso) {
                             hs.number_of_detached_contexts()};
 }
 
+void IsolateSetInternalContextRef(IsolatePtr iso_ptr, int ref) {
+  Isolate* iso = static_cast<Isolate*>(iso_ptr);
+  if (iso == nullptr) {
+    return;
+  }
+  ISOLATE_SCOPE(iso);
+  m_ctx* ctx = isolateInternalContext(iso);
+  if (ctx != nullptr) {
+    Local<Context> local_ctx = ctx->ptr.Get(iso);
+    local_ctx->SetEmbedderData(1, Integer::New(iso, ref));
+  }
+}
+
 RtnUnboundScript IsolateCompileUnboundScript(IsolatePtr iso,
                                              const char* s,
                                              const char* o,
@@ -929,6 +942,26 @@ int ContextRetainedValueCount(ContextPtr ctx) {
   return ctx->vals.size();
 }
 
+void ContextResetRetainedValues(ContextPtr ctx) {
+  if (ctx == nullptr) {
+    return;
+  }
+
+  Isolate* iso = ctx->iso;
+  Locker locker(iso);
+  Isolate::Scope isolate_scope(iso);
+  HandleScope handle_scope(iso);
+
+  for (auto it = ctx->vals.begin(); it != ctx->vals.end(); ) {
+    m_value* val = it->second;
+    if (val != nullptr) {
+      val->ptr.Reset();
+      delete val;
+    }
+    it = ctx->vals.erase(it);
+  }
+}
+
 void ContextFree(ContextPtr ctx) {
   if (ctx == nullptr) {
     return;
@@ -944,8 +977,10 @@ void ContextFree(ContextPtr ctx) {
 
   for (auto it = ctx->vals.begin(); it != ctx->vals.end(); ++it) {
     auto value = it->second;
-    value->ptr.Reset();
-    delete value;
+    if (value != nullptr) {
+      value->ptr.Reset();
+      delete value;
+    }
   }
   ctx->vals.clear();
 
@@ -1102,12 +1137,145 @@ const char* JSONStringify(ContextPtr ctx, ValuePtr val) {
   return CopyString(json);
 }
 
+RtnBinary ValueSerialize(ContextPtr ctx, ValuePtr val) {
+  if (val == nullptr) {
+    RtnBinary rtn = {};
+    rtn.error.msg = CopyString("Value is required");
+    return rtn;
+  }
+
+  Isolate* iso = (ctx != nullptr) ? ctx->iso : val->iso;
+  Locker locker(iso);
+  Isolate::Scope isolate_scope(iso);
+  HandleScope handle_scope(iso);
+  TryCatch try_catch(iso);
+
+  Local<Context> local_ctx;
+  if (ctx != nullptr) {
+    local_ctx = ctx->ptr.Get(iso);
+  } else if (val->ctx != nullptr) {
+    local_ctx = val->ctx->ptr.Get(iso);
+  } else {
+    m_ctx* mctx = isolateInternalContext(iso);
+    local_ctx = mctx->ptr.Get(iso);
+  }
+  Context::Scope context_scope(local_ctx);
+
+  RtnBinary rtn = {};
+  ValueSerializer serializer(iso);
+  serializer.WriteHeader();
+  Local<Value> value = val->ptr.Get(iso);
+  Maybe<bool> res = serializer.WriteValue(local_ctx, value);
+  if (res.IsNothing() || !res.FromJust()) {
+    rtn.error = ExceptionError(try_catch, iso, local_ctx);
+    return rtn;
+  }
+
+  std::pair<uint8_t*, size_t> buf = serializer.Release();
+  rtn.data = buf.first;
+  rtn.length = buf.second;
+  return rtn;
+}
+
+RtnValue ContextDeserialize(ContextPtr ctx, const uint8_t* data, size_t length) {
+  LOCAL_CONTEXT(ctx);
+  RtnValue rtn = {};
+  if (data == nullptr || length == 0) {
+    rtn.error.msg = CopyString("Data is required");
+    return rtn;
+  }
+
+  ValueDeserializer deserializer(iso, data, length);
+  Maybe<bool> header = deserializer.ReadHeader(local_ctx);
+  if (header.IsNothing() || !header.FromJust()) {
+    rtn.error = ExceptionError(try_catch, iso, local_ctx);
+    return rtn;
+  }
+
+  MaybeLocal<Value> res = deserializer.ReadValue(local_ctx);
+  if (res.IsEmpty()) {
+    rtn.error = ExceptionError(try_catch, iso, local_ctx);
+    return rtn;
+  }
+
+  m_value* val = new m_value;
+  val->id = 0;
+  val->iso = iso;
+  val->ctx = ctx;
+  val->ptr = Persistent<Value, CopyablePersistentTraits<Value>>(iso, res.ToLocalChecked());
+
+  rtn.value = tracked_value(ctx, val);
+  return rtn;
+}
+
+RtnValue ContextNewUint8Array(ContextPtr ctx, const uint8_t* data, size_t length) {
+  LOCAL_CONTEXT(ctx);
+  RtnValue rtn = {};
+
+  Local<ArrayBuffer> ab = ArrayBuffer::New(iso, length);
+  if (length > 0 && data != nullptr) {
+    std::shared_ptr<BackingStore> store = ab->GetBackingStore();
+    std::memcpy(store->Data(), data, length);
+  }
+
+  Local<Uint8Array> u8 = Uint8Array::New(ab, 0, length);
+  m_value* val = new m_value;
+  val->id = 0;
+  val->iso = iso;
+  val->ctx = ctx;
+  val->ptr = Persistent<Value, CopyablePersistentTraits<Value>>(iso, u8);
+
+  rtn.value = tracked_value(ctx, val);
+  return rtn;
+}
+
+RtnBinary ValueUint8ArrayBytes(ValuePtr val) {
+  RtnBinary rtn = {};
+  if (val == nullptr) {
+    rtn.error.msg = CopyString("Value is required");
+    return rtn;
+  }
+
+  Isolate* iso = val->iso;
+  Locker locker(iso);
+  Isolate::Scope isolate_scope(iso);
+  HandleScope handle_scope(iso);
+
+  Local<Value> value = val->ptr.Get(iso);
+  if (!value->IsUint8Array()) {
+    rtn.error.msg = CopyString("Value is not a Uint8Array");
+    return rtn;
+  }
+
+  Local<Uint8Array> u8 = value.As<Uint8Array>();
+  Local<ArrayBuffer> ab = u8->Buffer();
+  size_t offset = u8->ByteOffset();
+  size_t length = u8->ByteLength();
+
+  uint8_t* out = nullptr;
+  if (length > 0) {
+    out = static_cast<uint8_t*>(std::malloc(length));
+    if (out == nullptr) {
+      rtn.error.msg = CopyString("Memory allocation failed");
+      return rtn;
+    }
+    const uint8_t* src = static_cast<const uint8_t*>(ab->GetBackingStore()->Data()) + offset;
+    std::memcpy(out, src, length);
+  }
+
+  rtn.data = out;
+  rtn.length = length;
+  return rtn;
+}
+
 void ValueRelease(ValuePtr ptr) {
   if (ptr == nullptr) {
     return;
   }
 
-  ptr->ctx->vals.erase(ptr->id);
+  if (ptr->ctx != nullptr) {
+    ptr->ctx->vals.erase(ptr->id);
+  }
   ptr->ptr.Reset();
   delete ptr;
 }

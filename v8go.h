@@ -125,6 +125,12 @@ typedef struct {
 } RtnString;
 
 typedef struct {
+  uint8_t* data;
+  size_t length;
+  RtnError error;
+} RtnBinary;
+
+typedef struct {
   size_t total_heap_size;
   size_t total_heap_size_executable;
   size_t total_physical_size;
@@ -163,6 +169,7 @@ extern void IsolateDispose(IsolatePtr ptr);
 extern void IsolateTerminateExecution(IsolatePtr ptr);
 extern int IsolateIsExecutionTerminating(IsolatePtr ptr);
 extern IsolateHStatistics IsolationGetHeapStatistics(IsolatePtr ptr);
+extern void IsolateSetInternalContextRef(IsolatePtr iso, int ref);
 
 extern ValuePtr IsolateThrowException(IsolatePtr iso, ValuePtr value);
 
@@ -188,12 +195,17 @@ extern ContextPtr NewContext(IsolatePtr iso_ptr,
                              TemplatePtr global_template_ptr,
                              int ref);
 extern int ContextRetainedValueCount(ContextPtr ctx);
+extern void ContextResetRetainedValues(ContextPtr ctx);
 extern void ContextFree(ContextPtr ptr);
 extern RtnValue RunScript(ContextPtr ctx_ptr,
                           const char* source,
                           const char* origin);
 extern RtnValue JSONParse(ContextPtr ctx_ptr, const char* str);
 const char* JSONStringify(ContextPtr ctx_ptr, ValuePtr val_ptr);
+extern RtnBinary ValueSerialize(ContextPtr ctx_ptr, ValuePtr val_ptr);
+extern RtnValue ContextDeserialize(ContextPtr ctx_ptr, const uint8_t* data, size_t length);
+extern RtnValue ContextNewUint8Array(ContextPtr ctx_ptr, const uint8_t* data, size_t length);
+extern RtnBinary ValueUint8ArrayBytes(ValuePtr val_ptr);
 extern ValuePtr ContextGlobal(ContextPtr ctx_ptr);
 
 typedef struct {

@@ -32,9 +32,10 @@ var ctxSeq = 0
 // Context is a global root execution environment that allows separate,
 // unrelated, JavaScript applications to run in a single instance of V8.
 type Context struct {
-	ref int
-	ptr C.ContextPtr
-	iso *Isolate
+	ref          int
+	ptr          C.ContextPtr
+	iso          *Isolate
+	isolateOwned bool
 }
 
 type contextOptions struct {
@@ -88,7 +89,21 @@ func (c *Context) Isolate() *Isolate {
 func (c *Context) RetainedValueCount() int {
 	ctxMutex.Lock()
 	defer ctxMutex.Unlock()
+	if c == nil || c.ptr == nil {
+		return 0
+	}
 	return int(C.ContextRetainedValueCount(c.ptr))
+}
+
+// ResetRetainedValues releases all internally tracked values in the context.
+// This frees all Persistent handles, allowing V8 to garbage-collect the underlying objects.
+func (c *Context) ResetRetainedValues() {
+	ctxMutex.Lock()
+	defer ctxMutex.Unlock()
+	if c == nil || c.ptr == nil {
+		return
+	}
+	C.ContextResetRetainedValues(c.ptr)
 }
 
 // RunScript executes the source JavaScript; origin (a.k.a. filename) provides a
@@ -155,6 +170,9 @@ func (c *Context) beginClose() (C.ContextPtr, bool) {
 	if c == nil {
 		return nil, false
 	}
+	if c.isolateOwned {
+		return nil, false
+	}
 
 	ctxMutex.Lock()
 	r := ctxRegistry[c.ref]
@@ -206,6 +224,50 @@ func (c *Context) finishClose(ptr C.ContextPtr) {
 		delete(ctxRegistry, c.ref)
 	}
 	close(r.closeDone)
+}
+
+func newInternalContext(iso *Isolate, ptr C.ContextPtr) *Context {
+	ctxMutex.Lock()
+	ctxSeq++
+	ref := ctxSeq
+	ctxMutex.Unlock()
+
+	C.IsolateSetInternalContextRef(iso.ptr, C.int(ref))
+
+	ctx := &Context{
+		ref:          ref,
+		ptr:          ptr,
+		iso:          iso,
+		isolateOwned: true,
+	}
+	ctx.register()
+	return ctx
+}
+
+func (c *Context) disposeInternal() {
+	if c == nil {
+		return
+	}
+	ctxMutex.Lock()
+	r := ctxRegistry[c.ref]
+	if r == nil {
+		c.ptr = nil
+		ctxMutex.Unlock()
+		return
+	}
+	r.closing = true
+	callbacksDone := r.callbacksDone
+	ctxMutex.Unlock()
+
+	<-callbacksDone
+
+	ctxMutex.Lock()
+	c.ptr = nil
+	delete(ctxRegistry, c.ref)
+	if r.closeDone != nil {
+		close(r.closeDone)
+	}
+	ctxMutex.Unlock()
 }
 
 func getContext(ref int) *Context {

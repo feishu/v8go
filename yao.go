@@ -60,21 +60,10 @@ func (iso *Isolate) Copy() (*Isolate, error) {
 }
 
 // Context returns the current context for this isolate.
-// DO NOT CALL CLOSE, IT WILL CAUSE PANIC
-// THE CONTEXT WILL BE DISPOSED AUTOMATICALLY
+// The internal context is managed by the Isolate and will be disposed automatically
+// when the Isolate is disposed. Calling Close() on this context is safe and will be ignored.
 func (iso *Isolate) Context() (*Context, error) {
-	ptr := C.YaoIsolateContext(iso.ptr)
-	if ptr == nil {
-		return nil, fmt.Errorf("no current context")
-	}
-
-	ctxSeq++
-	ref := ctxSeq
-	return &Context{
-		ref: ref,
-		ptr: ptr,
-		iso: iso,
-	}, nil
+	return iso.getOrCreateInternalContext()
 }
 
 // AsGlobal makes the isolate into a global object.

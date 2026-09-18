@@ -9,6 +9,7 @@ package v8go
 import "C"
 
 import (
+	"errors"
 	"sync"
 	"unsafe"
 )
@@ -27,6 +28,9 @@ type Isolate struct {
 
 	null      *Value
 	undefined *Value
+
+	internalCtxMu sync.Mutex
+	internalCtx   *Context
 }
 
 // HeapStatistics represents V8 isolate heap statistics
@@ -143,9 +147,37 @@ func (i *Isolate) Dispose() {
 	if i.ptr == nil {
 		return
 	}
+	i.internalCtxMu.Lock()
+	if i.internalCtx != nil {
+		i.internalCtx.disposeInternal()
+		i.internalCtx = nil
+	}
+	i.internalCtxMu.Unlock()
+
 	C.IsolateDispose(i.ptr)
 	i.ptr = nil
 	i.cbs = nil
+}
+
+func (i *Isolate) getOrCreateInternalContext() (*Context, error) {
+	if i == nil || i.ptr == nil {
+		return nil, errors.New("v8go: isolate is nil or disposed")
+	}
+
+	i.internalCtxMu.Lock()
+	defer i.internalCtxMu.Unlock()
+
+	if i.internalCtx != nil {
+		return i.internalCtx, nil
+	}
+
+	ptr := C.YaoIsolateContext(i.ptr)
+	if ptr == nil {
+		return nil, errors.New("v8go: no internal context for isolate")
+	}
+
+	i.internalCtx = newInternalContext(i, ptr)
+	return i.internalCtx, nil
 }
 
 // ThrowException schedules an exception to be thrown when returning to

@@ -531,6 +531,9 @@ func (v *Value) IsProxy() bool {
 
 // Release this value.  Using the value after calling this function will result in undefined behavior.
 func (v *Value) Release() {
+	if v == nil || v.ptr == nil {
+		return
+	}
 
 	// Yao: Invoke the __release() callback if present on the object.
 	// This allows JavaScript objects to perform custom cleanup (e.g., unregistering from Go maps)
@@ -541,7 +544,9 @@ func (v *Value) Release() {
 	// if it is an external object.
 	v.ReleaseExternal()
 
-	C.ValueRelease(v.ptr)
+	ptr := v.ptr
+	v.ptr = nil
+	C.ValueRelease(ptr)
 }
 
 // ReleaseObject release the object if it is an object. (Yao Application Engine)
