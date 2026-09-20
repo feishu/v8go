@@ -1102,6 +1102,31 @@ RtnValue JSONParse(ContextPtr ctx, const char* str) {
   return rtn;
 }
 
+RtnValue JSONParseBytes(ContextPtr ctx, const char* data, int length) {
+  LOCAL_CONTEXT(ctx);
+  RtnValue rtn = {};
+
+  Local<String> v8Str;
+  if (!String::NewFromUtf8(iso, data, NewStringType::kNormal, length).ToLocal(&v8Str)) {
+    rtn.error = ExceptionError(try_catch, iso, local_ctx);
+    return rtn;
+  }
+
+  Local<Value> result;
+  if (!JSON::Parse(local_ctx, v8Str).ToLocal(&result)) {
+    rtn.error = ExceptionError(try_catch, iso, local_ctx);
+    return rtn;
+  }
+  m_value* val = new m_value;
+  val->id = 0;
+  val->iso = iso;
+  val->ctx = ctx;
+  val->ptr = Persistent<Value, CopyablePersistentTraits<Value>>(iso, result);
+
+  rtn.value = tracked_value(ctx, val);
+  return rtn;
+}
+
 const char* JSONStringify(ContextPtr ctx, ValuePtr val) {
   Isolate* iso;
   Local<Context> local_ctx;
@@ -1135,6 +1160,63 @@ const char* JSONStringify(ContextPtr ctx, ValuePtr val) {
   }
   String::Utf8Value json(iso, str);
   return CopyString(json);
+}
+
+RtnBinary JSONStringifyBytes(ContextPtr ctx, ValuePtr val) {
+  if (val == nullptr) {
+    RtnBinary rtn = {};
+    rtn.error.msg = CopyString("Value is required");
+    return rtn;
+  }
+
+  Isolate* iso;
+  Local<Context> local_ctx;
+
+  if (ctx != nullptr) {
+    iso = ctx->iso;
+  } else {
+    iso = val->iso;
+  }
+
+  Locker locker(iso);
+  Isolate::Scope isolate_scope(iso);
+  HandleScope handle_scope(iso);
+  TryCatch try_catch(iso);
+
+  if (ctx != nullptr) {
+    local_ctx = ctx->ptr.Get(iso);
+  } else {
+    if (val->ctx != nullptr) {
+      local_ctx = val->ctx->ptr.Get(iso);
+    } else {
+      m_ctx* ctx = isolateInternalContext(iso);
+      local_ctx = ctx->ptr.Get(iso);
+    }
+  }
+
+  Context::Scope context_scope(local_ctx);
+
+  RtnBinary rtn = {};
+  Local<String> str;
+  if (!JSON::Stringify(local_ctx, val->ptr.Get(iso)).ToLocal(&str)) {
+    rtn.error = ExceptionError(try_catch, iso, local_ctx);
+    return rtn;
+  }
+
+  String::Utf8Value json(iso, str);
+  if (json.length() == 0) {
+    return rtn;
+  }
+
+  uint8_t* buf = (uint8_t*)malloc(json.length());
+  if (buf == nullptr) {
+    rtn.error.msg = CopyString("Out of memory");
+    return rtn;
+  }
+  memcpy(buf, *json, json.length());
+  rtn.data = buf;
+  rtn.length = json.length();
+  return rtn;
 }
 
 RtnBinary ValueSerialize(ContextPtr ctx, ValuePtr val) {

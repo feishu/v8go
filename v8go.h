@@ -201,7 +201,9 @@ extern RtnValue RunScript(ContextPtr ctx_ptr,
                           const char* source,
                           const char* origin);
 extern RtnValue JSONParse(ContextPtr ctx_ptr, const char* str);
+extern RtnValue JSONParseBytes(ContextPtr ctx_ptr, const char* data, int length);
 const char* JSONStringify(ContextPtr ctx_ptr, ValuePtr val_ptr);
+extern RtnBinary JSONStringifyBytes(ContextPtr ctx_ptr, ValuePtr val_ptr);
 extern RtnBinary ValueSerialize(ContextPtr ctx_ptr, ValuePtr val_ptr);
 extern RtnValue ContextDeserialize(ContextPtr ctx_ptr, const uint8_t* data, size_t length);
 extern RtnValue ContextNewUint8Array(ContextPtr ctx_ptr, const uint8_t* data, size_t length);

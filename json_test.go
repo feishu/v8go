@@ -31,6 +31,25 @@ func TestJSONParse(t *testing.T) {
 	}
 }
 
+func TestJSONParseBytes(t *testing.T) {
+	t.Parallel()
+
+	if _, err := v8.JSONParseBytes(nil, []byte("{}")); err == nil {
+		t.Error("expected error but got <nil>")
+	}
+	ctx := v8.NewContext()
+	defer ctx.Isolate().Dispose()
+	defer ctx.Close()
+
+	val, err := v8.JSONParseBytes(ctx, []byte(`{"hello": "world", "num": 123}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if val == nil || !val.IsObject() {
+		t.Errorf("expected object, got: %v", val)
+	}
+}
+
 func TestJSONStringify(t *testing.T) {
 	t.Parallel()
 
@@ -39,6 +58,33 @@ func TestJSONStringify(t *testing.T) {
 	defer ctx.Close()
 	if _, err := v8.JSONStringify(ctx, nil); err == nil {
 		t.Error("expected error but got <nil>")
+	}
+}
+
+func TestJSONStringifyBytes(t *testing.T) {
+	t.Parallel()
+
+	ctx := v8.NewContext()
+	defer ctx.Isolate().Dispose()
+	defer ctx.Close()
+
+	if _, err := v8.JSONStringifyBytes(ctx, nil); err == nil {
+		t.Error("expected error but got <nil>")
+	}
+
+	val, err := v8.JSONParseBytes(ctx, []byte(`{"a":1,"b":"hello"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := v8.JSONStringifyBytes(ctx, val)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expected := `{"a":1,"b":"hello"}`
+	if string(raw) != expected {
+		t.Errorf("expected %s, got %s", expected, string(raw))
 	}
 }
 

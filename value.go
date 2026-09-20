@@ -617,11 +617,7 @@ func (v *Value) AsFunction() (*Function, error) {
 
 // MarshalJSON implements the json.Marshaler interface.
 func (v *Value) MarshalJSON() ([]byte, error) {
-	jsonStr, err := JSONStringify(nil, v)
-	if err != nil {
-		return nil, err
-	}
-	return []byte(jsonStr), nil
+	return JSONStringifyBytes(nil, v)
 }
 
 // SharedArrayBufferGetContents will get the contents of the SharedArrayBuffer.
