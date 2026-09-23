@@ -32,6 +32,7 @@ var ctxSeq = 0
 // Context is a global root execution environment that allows separate,
 // unrelated, JavaScript applications to run in a single instance of V8.
 type Context struct {
+	mu           sync.Mutex
 	ref          int
 	ptr          C.ContextPtr
 	iso          *Isolate
@@ -87,9 +88,12 @@ func (c *Context) Isolate() *Isolate {
 }
 
 func (c *Context) RetainedValueCount() int {
-	ctxMutex.Lock()
-	defer ctxMutex.Unlock()
-	if c == nil || c.ptr == nil {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ptr == nil {
 		return 0
 	}
 	return int(C.ContextRetainedValueCount(c.ptr))
@@ -98,9 +102,12 @@ func (c *Context) RetainedValueCount() int {
 // ResetRetainedValues releases all internally tracked values in the context.
 // This frees all Persistent handles, allowing V8 to garbage-collect the underlying objects.
 func (c *Context) ResetRetainedValues() {
-	ctxMutex.Lock()
-	defer ctxMutex.Unlock()
-	if c == nil || c.ptr == nil {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ptr == nil {
 		return
 	}
 	C.ContextResetRetainedValues(c.ptr)

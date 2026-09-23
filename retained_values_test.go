@@ -141,3 +141,41 @@ func BenchmarkCallbackWithManualRelease(b *testing.B) {
 	b.StopTimer()
 	b.Logf("Benchmark ended. Context Retained Value Count: %d", ctx.RetainedValueCount())
 }
+
+// TestConcurrentContextResetRetainedValues verifies that multiple contexts across goroutines
+// can call ResetRetainedValues concurrently without global lock serialization.
+func TestConcurrentContextResetRetainedValues(t *testing.T) {
+	const numGoroutines = 8
+	const iterations = 50
+
+	errCh := make(chan error, numGoroutines)
+	for g := 0; g < numGoroutines; g++ {
+		go func() {
+			iso := v8.NewIsolate()
+			defer iso.Dispose()
+			ctx := v8.NewContext(iso)
+			defer ctx.Close()
+
+			for i := 0; i < iterations; i++ {
+				val, err := ctx.RunScript("({ name: 'yao', count: 123 })", "")
+				if err != nil {
+					errCh <- err
+					return
+				}
+				_ = val
+				ctx.ResetRetainedValues()
+				if count := ctx.RetainedValueCount(); count != 0 {
+					errCh <- nil
+					return
+				}
+			}
+			errCh <- nil
+		}()
+	}
+
+	for g := 0; g < numGoroutines; g++ {
+		if err := <-errCh; err != nil {
+			t.Fatalf("concurrent context reset failed: %v", err)
+		}
+	}
+}
