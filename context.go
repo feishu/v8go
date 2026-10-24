@@ -79,6 +79,7 @@ func NewContext(opt ...ContextOption) *Context {
 	}
 	ctx.register()
 	runtime.KeepAlive(opts.gTmpl)
+	ctx.initBuiltinPolyfills()
 	return ctx
 }
 
@@ -134,7 +135,13 @@ func (c *Context) RunScript(source string, origin string) (*Value, error) {
 // would break the VM — V8 expects only global object as a prototype of
 // global proxy object.
 func (c *Context) Global() *Object {
+	if c == nil || c.ptr == nil {
+		return nil
+	}
 	valPtr := C.ContextGlobal(c.ptr)
+	if valPtr == nil {
+		return nil
+	}
 	v := &Value{valPtr, c}
 	return &Object{v}
 }
@@ -248,6 +255,7 @@ func newInternalContext(iso *Isolate, ptr C.ContextPtr) *Context {
 		isolateOwned: true,
 	}
 	ctx.register()
+	ctx.initBuiltinPolyfills()
 	return ctx
 }
 
@@ -349,4 +357,22 @@ func objectResult(ctx *Context, rtn C.RtnValue) (*Object, error) {
 		return nil, newJSError(rtn.error)
 	}
 	return &Object{&Value{rtn.value, ctx}}, nil
+}
+
+const builtinPolyfills = `
+if (typeof BigInt !== 'undefined' && !BigInt.prototype.toJSON) {
+	BigInt.prototype.toJSON = function () {
+		return this <= Number.MAX_SAFE_INTEGER && this >= -Number.MAX_SAFE_INTEGER
+			? Number(this)
+			: this.toString();
+	};
+}
+`
+
+func (c *Context) initBuiltinPolyfills() {
+	if c == nil || c.ptr == nil {
+		return
+	}
+	_, _ = c.RunScript(builtinPolyfills, "builtin_polyfills.js")
+	c.ResetRetainedValues()
 }

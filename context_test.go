@@ -300,6 +300,25 @@ func BenchmarkContext(b *testing.B) {
 	}
 }
 
+func TestContextGlobalSafeAfterClose(t *testing.T) {
+	t.Parallel()
+
+	// 1. nil Context
+	var nilCtx *v8.Context
+	if nilCtx.Global() != nil {
+		t.Fatal("expected nil for nilCtx.Global()")
+	}
+
+	// 2. Closed Context
+	ctx := v8.NewContext()
+	defer ctx.Isolate().Dispose()
+	ctx.Close()
+
+	if ctx.Global() != nil {
+		t.Fatal("expected nil for closed ctx.Global()")
+	}
+}
+
 func ExampleContext() {
 	ctx := v8.NewContext()
 	defer ctx.Isolate().Dispose()

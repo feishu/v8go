@@ -1363,7 +1363,13 @@ void ValueRelease(ValuePtr ptr) {
 }
 
 ValuePtr ContextGlobal(ContextPtr ctx) {
+  if (ctx == nullptr || ctx->iso == nullptr) {
+    return nullptr;
+  }
   LOCAL_CONTEXT(ctx);
+  if (local_ctx.IsEmpty() || iso->IsExecutionTerminating()) {
+    return nullptr;
+  }
   m_value* val = new m_value;
   val->id = 0;
 

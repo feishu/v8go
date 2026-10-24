@@ -8,6 +8,7 @@ package v8go
 // #include "v8go.h"
 import "C"
 import (
+	"bytes"
 	"errors"
 	"unsafe"
 )
@@ -55,11 +56,17 @@ func JSONStringify(ctx *Context, val Valuer) (string, error) {
 	return C.GoString(str), nil
 }
 
-// JSONStringifyBytes serializes the JSON-serializable object value directly to byte slice.
-func JSONStringifyBytes(ctx *Context, val Valuer) ([]byte, error) {
+// JSONStringifyView serializes the JSON-serializable object value and provides a zero-copy
+// byte view to the callback function. The backing memory is freed immediately after fn returns.
+// The view slice MUST NOT be used or retained outside of fn.
+func JSONStringifyView(ctx *Context, val Valuer, fn func(view []byte) error) error {
 	if val == nil || val.value() == nil {
-		return nil, errors.New("v8go: Value is required")
+		return errors.New("v8go: Value is required")
 	}
+	if fn == nil {
+		return nil
+	}
+
 	var ctxPtr C.ContextPtr
 	if ctx != nil {
 		ctxPtr = ctx.ptr
@@ -72,14 +79,32 @@ func JSONStringifyBytes(ctx *Context, val Valuer) ([]byte, error) {
 		if rtn.data != nil {
 			C.free(unsafe.Pointer(rtn.data))
 		}
-		return nil, newJSError(rtn.error)
+		return newJSError(rtn.error)
 	}
 
 	if rtn.data == nil || rtn.length == 0 {
-		return []byte{}, nil
+		return fn([]byte{})
 	}
 
-	b := C.GoBytes(unsafe.Pointer(rtn.data), C.int(rtn.length))
-	C.free(unsafe.Pointer(rtn.data))
+	defer C.free(unsafe.Pointer(rtn.data))
+
+	view := unsafe.Slice((*byte)(unsafe.Pointer(rtn.data)), int(rtn.length))
+	return fn(view)
+}
+
+// JSONStringifyBytes serializes the JSON-serializable object value directly to byte slice.
+func JSONStringifyBytes(ctx *Context, val Valuer) ([]byte, error) {
+	var b []byte
+	err := JSONStringifyView(ctx, val, func(view []byte) error {
+		if len(view) == 0 {
+			b = []byte{}
+			return nil
+		}
+		b = bytes.Clone(view)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
 	return b, nil
 }
